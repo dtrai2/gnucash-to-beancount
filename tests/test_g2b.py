@@ -465,3 +465,21 @@ option "title" "Exported GnuCash Book"
         prices = g2b._get_prices()
         for price in prices:
             assert isinstance(price, data.Price)
+
+    @mock.patch("beancount.core.amount.Amount", mock.MagicMock())
+    @mock.patch("g2b.g2b.GnuCash2Beancount._calculate_price_of_split", mock.MagicMock())
+    @mock.patch("g2b.g2b.GnuCash2Beancount._apply_renaming_patterns", mock.MagicMock())
+    def test_get_postings_includes_meta_information(self, tmp_path):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(yaml.dump(self.test_config))
+        g2b = GnuCash2Beancount(self.gnucash_path, Path(), config_path)
+        mock_splits = [
+            mock.MagicMock(memo=" Test Memo ", action=" Test Action "),
+            mock.MagicMock(memo="Test Memo", action=None),
+            mock.MagicMock(memo=None, action="Test Action"),
+        ]
+        postings = g2b._get_postings(mock_splits)
+        assert len(postings) == 3
+        assert postings[0].meta == {"action": "Test Action", "memo": "Test Memo"}
+        assert postings[1].meta == {"memo": "Test Memo"}
+        assert postings[2].meta == {"action": "Test Action"}
