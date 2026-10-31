@@ -6,6 +6,7 @@ import datetime
 import re
 from importlib.metadata import version
 from pathlib import Path, PosixPath
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -60,7 +61,7 @@ class TestCLI:
         assert version("g2b") in result.output
 
 
-class TestGnuCash2Beancount:
+class GnuCash2BeancountTestBase:
 
     def setup_method(self):
         self.test_config = {
@@ -84,6 +85,16 @@ class TestGnuCash2Beancount:
             },
         }
         self.gnucash_path = Path("tests/test_book.gnucash")
+
+    def _create_converter(self, tmp_path, gnucash_config=None, filepath=Path()):
+        if gnucash_config:
+            self.test_config["gnucash"].update(gnucash_config)
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(yaml.dump(self.test_config))
+        return GnuCash2Beancount(filepath, Path(), config_path)
+
+
+class TestGnuCash2Beancount(GnuCash2BeancountTestBase):
 
     def test_configs_returns_valid_yaml(self, tmp_path):
         config_path = tmp_path / "config.yaml"
@@ -483,3 +494,106 @@ option "title" "Exported GnuCash Book"
         assert postings[0].meta == {"action": "Test Action", "memo": "Test Memo"}
         assert postings[1].meta == {"memo": "Test Memo"}
         assert postings[2].meta == {"action": "Test Action"}
+
+
+class TestSlots(GnuCash2BeancountTestBase):
+
+    def test_slots_config_defaults_to_assoc_uri(self, tmp_path):
+        g2b = self._create_converter(tmp_path)
+        assert g2b._slots_config == ["assoc_uri"]
+
+    def test_slots_config_returns_configured_slots(self, tmp_path):
+        g2b = self._create_converter(tmp_path, {"slots": ["date-posted", "assoc_uri"]})
+        assert g2b._slots_config == ["date-posted", "assoc_uri"]
+
+    def test_slot_rename_patterns_are_empty_by_default(self, tmp_path):
+        g2b = self._create_converter(tmp_path)
+        assert g2b._slot_rename_patterns == {}
+
+    @pytest.mark.parametrize(
+        "configured_patterns",
+        [
+            [["date-posted", "posted"]],
+            {"date-posted": "posted"},
+        ],
+    )
+    def test_slot_rename_patterns_returns_a_mapping(self, tmp_path, configured_patterns):
+        g2b = self._create_converter(tmp_path, {"slots_rename_patterns": configured_patterns})
+        assert g2b._slot_rename_patterns == {"date-posted": "posted"}
+
+    def test_get_slot_metadata_returns_empty_dict_without_slots(self, tmp_path):
+        g2b = self._create_converter(tmp_path)
+        assert not g2b._get_slot_metadata(None)
+        assert not g2b._get_slot_metadata([])
+
+    def test_get_slot_metadata_ignores_slots_that_are_not_configured(self, tmp_path):
+        g2b = self._create_converter(tmp_path)
+        slots = [SimpleNamespace(name="date-posted", value=datetime.date(2024, 5, 1))]
+        assert not g2b._get_slot_metadata(slots)
+
+    def test_get_slot_metadata_exports_configured_slots(self, tmp_path):
+        g2b = self._create_converter(tmp_path, {"slots": ["date-posted"]})
+        slots = [SimpleNamespace(name="date-posted", value=datetime.date(2024, 5, 1))]
+        assert g2b._get_slot_metadata(slots) == {"date-posted": "2024-05-01"}
+
+    def test_get_slot_metadata_exports_assoc_uri_by_default(self, tmp_path):
+        g2b = self._create_converter(tmp_path)
+        slots = [SimpleNamespace(name="assoc_uri", value="https://example.com/receipt.pdf")]
+        assert g2b._get_slot_metadata(slots) == {"url": "https://example.com/receipt.pdf"}
+
+    @pytest.mark.parametrize(
+        "url",
+        ["http://example.com/receipt.pdf", "https://example.com/receipt.pdf"],
+    )
+    def test_get_slot_metadata_maps_url_assoc_uri_to_url(self, tmp_path, url):
+        g2b = self._create_converter(tmp_path)
+        slots = [SimpleNamespace(name="assoc_uri", value=f"  {url}  ")]
+        assert g2b._get_slot_metadata(slots) == {"url": url}
+
+    def test_get_slot_metadata_maps_non_url_assoc_uri_to_document(self, tmp_path):
+        g2b = self._create_converter(tmp_path)
+        slots = [SimpleNamespace(name="assoc_uri", value=" receipts/receipt.pdf ")]
+        assert g2b._get_slot_metadata(slots) == {"document": "receipts/receipt.pdf"}
+
+    def test_get_slot_metadata_renames_slots(self, tmp_path):
+        g2b = self._create_converter(
+            tmp_path,
+            {
+                "slots": ["date-posted"],
+                "slots_rename_patterns": [["date-posted", "posted"]],
+            },
+        )
+        slots = [SimpleNamespace(name="date-posted", value=datetime.date(2024, 5, 1))]
+        assert g2b._get_slot_metadata(slots) == {"posted": "2024-05-01"}
+
+    def test_get_slot_metadata_skips_empty_slots(self, tmp_path):
+        g2b = self._create_converter(tmp_path, {"slots": ["date-posted", "notes"]})
+        slots = [
+            None,
+            SimpleNamespace(name=None, value="ignored"),
+            SimpleNamespace(name="date-posted", value=None),
+            SimpleNamespace(name="date-posted", value="   "),
+            SimpleNamespace(name="notes", value=0),
+        ]
+        assert g2b._get_slot_metadata(slots) == {"notes": "0"}
+
+    def test_get_transactions_includes_metadata_of_configured_slots(self, tmp_path):
+        g2b = self._create_converter(
+            tmp_path,
+            {
+                "slots": ["date-posted"],
+                "slots_rename_patterns": [["date-posted", "posted"]],
+            },
+            filepath=self.gnucash_path,
+        )
+        g2b._read_gnucash_book()
+        transactions = g2b._get_transactions()
+        assert [transaction.meta["posted"] for transaction in transactions] == [
+            "2024-05-01",
+            "2024-05-03",
+            "2024-05-06",
+            "2024-05-09",
+        ]
+        for transaction in transactions:
+            assert transaction.meta["filename"] == self.gnucash_path
+            assert transaction.meta["lineno"] == -1

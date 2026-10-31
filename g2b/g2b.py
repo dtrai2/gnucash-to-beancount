@@ -51,6 +51,8 @@ class GnuCash2Beancount:
     ]
     """Pattern for character replacements in account names"""
 
+    _URL_PATTERN = re.compile(r"^[a-zA-z][\w+.-]*://")
+
     @cached_property
     def _configs(self) -> Dict:
         """Loads and returns the configuration as a dict"""
@@ -92,6 +94,16 @@ class GnuCash2Beancount:
             self._gnucash_config.get("account_rename_patterns", [])
             + self._DEFAULT_ACCOUNT_RENAME_PATTERNS
         )
+
+    @cached_property
+    def _slots_config(self) -> List:
+        """Returns a list of pattern that should be used to sanitize slot names"""
+        return self._gnucash_config.get("slots", ["assoc_uri"])
+
+    @cached_property
+    def _slot_rename_patterns(self) -> Dict:
+        """Returns a mapping of slot names that should be renamed on export"""
+        return dict(self._gnucash_config.get("slots_rename_patterns", {}))
 
     @cached_property
     def _non_default_account_currencies(self) -> Dict:
@@ -155,9 +167,13 @@ class GnuCash2Beancount:
             postings = self._get_postings(transaction.splits)
             posting_flags = [posting.flag for posting in postings]
             transaction_flag = "!" if "!" in posting_flags else "*"
+
+            meta = {"filename": self._filepath, "lineno": -1}
+            meta.update(self._get_slot_metadata(getattr(transaction, "slots", None)))
+
             transactions.append(
                 data.Transaction(
-                    meta={"filename": self._filepath, "lineno": -1},
+                    meta=meta,
                     date=transaction.post_date,
                     flag=transaction_flag,
                     payee="",
@@ -169,6 +185,30 @@ class GnuCash2Beancount:
             )
         transactions.sort(key=lambda txn: txn.date)
         return transactions
+
+    def _get_slot_metadata(self, slots) -> Dict:
+        """Returns Beancount metadata for all configured GnuCash slots"""
+        meta = {}
+        for slot in slots or []:
+            if not slot or not slot.name or slot.value is None:
+                continue
+            if slot.name not in self._slots_config:
+                continue
+
+            slot_value = str(slot.value).strip()
+            if not slot_value:
+                continue
+
+            mapped_slot_name = self._slot_rename_patterns.get(slot.name, slot.name)
+
+            if slot.name == "assoc_uri":
+                if self._URL_PATTERN.match(slot_value):
+                    meta["url"] = slot_value
+                else:
+                    meta["document"] = slot_value
+            else:
+                meta[mapped_slot_name] = slot_value
+        return meta
 
     def _get_postings(self, splits):
         postings = []
