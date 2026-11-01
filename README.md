@@ -56,6 +56,9 @@ gnucash:  # here you can specify details about your gnucash export
     - ["Money@[Bank]", "Assets:Money at Bank"]
   non_default_account_currencies:  # Here you have to name all accounts that deviate from the default currency
     Assets:Cash:Wallet: "NZD"
+  slots: ["date-posted"]  # specify slots that need to me exported (default: assoc-uri)
+  slots_rename_patterns: # Here you can rename slots
+    - ["date-posted", "posted"]
 beancount:  # here you can add beancount options, plugins and events that should be added to output file
   flag_postings: false  # if false, will set all transactions automatically to '*' (default: true)
   options:

@@ -51,6 +51,9 @@ class GnuCash2Beancount:
     ]
     """Pattern for character replacements in account names"""
 
+    _URL_PATTERN = re.compile(r"^[a-zA-z][\w+.-]*://")
+    _INVALID_LINK_CHARS_PATTERN = re.compile(r"[^A-Za-z0-9\-_/.]")
+
     @cached_property
     def _configs(self) -> Dict:
         """Loads and returns the configuration as a dict"""
@@ -92,6 +95,16 @@ class GnuCash2Beancount:
             self._gnucash_config.get("account_rename_patterns", [])
             + self._DEFAULT_ACCOUNT_RENAME_PATTERNS
         )
+
+    @cached_property
+    def _slots_config(self) -> List:
+        """Returns a list of pattern that should be used to sanitize slot names"""
+        return self._gnucash_config.get("slots", ["assoc_uri"])
+
+    @cached_property
+    def _slot_rename_patterns(self) -> Dict:
+        """Returns a mapping of slot names that should be renamed on export"""
+        return dict(self._gnucash_config.get("slots_rename_patterns", {}))
 
     @cached_property
     def _non_default_account_currencies(self) -> Dict:
@@ -155,20 +168,68 @@ class GnuCash2Beancount:
             postings = self._get_postings(transaction.splits)
             posting_flags = [posting.flag for posting in postings]
             transaction_flag = "!" if "!" in posting_flags else "*"
+
+            meta = {"filename": self._filepath, "lineno": -1}
+            meta.update(self._get_slot_metadata(getattr(transaction, "slots", None)))
+
+            links = set()
+            number = str(transaction.num or "").strip()
+            if number:
+                link = self._sanitize_link(number)
+                document_type = self._get_document_type(transaction)
+                if document_type and link:
+                    meta[f"{document_type}_id"] = transaction.num
+                    link = f"{document_type}-{link}"
+                if link:
+                    links.add(link)
+
             transactions.append(
                 data.Transaction(
-                    meta={"filename": self._filepath, "lineno": -1},
+                    meta=meta,
                     date=transaction.post_date,
                     flag=transaction_flag,
                     payee="",
                     narration=self._sanitize_description(transaction.description),
                     tags=data.EMPTY_SET,
-                    links=set(),
+                    links=links,
                     postings=postings,
                 )
             )
         transactions.sort(key=lambda txn: txn.date)
         return transactions
+
+    def _get_document_type(self, transaction):
+        """Returns whether the transaction belongs to an invoice or a bill"""
+        account_types = {split.account.type for split in transaction.splits}
+        if "RECEIVABLE" in account_types:
+            return "invoice"
+        if "PAYABLE" in account_types:
+            return "bill"
+        return None
+
+    def _get_slot_metadata(self, slots) -> Dict:
+        """Returns Beancount metadata for all configured GnuCash slots"""
+        meta = {}
+        for slot in slots or []:
+            if not slot or not slot.name or slot.value is None:
+                continue
+            if slot.name not in self._slots_config:
+                continue
+
+            slot_value = str(slot.value).strip()
+            if not slot_value:
+                continue
+
+            mapped_slot_name = self._slot_rename_patterns.get(slot.name, slot.name)
+
+            if slot.name == "assoc_uri":
+                if self._URL_PATTERN.match(slot_value):
+                    meta["url"] = slot_value
+                else:
+                    meta["document"] = slot_value
+            else:
+                meta[mapped_slot_name] = slot_value
+        return meta
 
     def _get_postings(self, splits):
         postings = []
@@ -259,6 +320,12 @@ class GnuCash2Beancount:
         description = description.replace("\xad", "")
         description = description.replace('"', "'")
         return description
+
+    def _sanitize_link(self, link) -> str:
+        """Removes characters that are not allowed in a beancount link"""
+        link = self._INVALID_LINK_CHARS_PATTERN.sub("-", link)
+        link = re.sub(r"-+", "-", link)
+        return link.strip("-")
 
     def _get_header_str(self) -> str:
         """Returns a string that combines the configured beancount options and plugins"""
