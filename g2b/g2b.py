@@ -52,6 +52,7 @@ class GnuCash2Beancount:
     """Pattern for character replacements in account names"""
 
     _URL_PATTERN = re.compile(r"^[a-zA-z][\w+.-]*://")
+    _INVALID_LINK_CHARS_PATTERN = re.compile(r"[^A-Za-z0-9\-_/.]")
 
     @cached_property
     def _configs(self) -> Dict:
@@ -171,6 +172,17 @@ class GnuCash2Beancount:
             meta = {"filename": self._filepath, "lineno": -1}
             meta.update(self._get_slot_metadata(getattr(transaction, "slots", None)))
 
+            links = set()
+            number = str(transaction.num or "").strip()
+            if number:
+                link = self._sanitize_link(number)
+                document_type = self._get_document_type(transaction)
+                if document_type and link:
+                    meta[f"{document_type}_id"] = transaction.num
+                    link = f"{document_type}-{link}"
+                if link:
+                    links.add(link)
+
             transactions.append(
                 data.Transaction(
                     meta=meta,
@@ -179,12 +191,21 @@ class GnuCash2Beancount:
                     payee="",
                     narration=self._sanitize_description(transaction.description),
                     tags=data.EMPTY_SET,
-                    links=set(),
+                    links=links,
                     postings=postings,
                 )
             )
         transactions.sort(key=lambda txn: txn.date)
         return transactions
+
+    def _get_document_type(self, transaction):
+        """Returns whether the transaction belongs to an invoice or a bill"""
+        account_types = {split.account.type for split in transaction.splits}
+        if "RECEIVABLE" in account_types:
+            return "invoice"
+        if "PAYABLE" in account_types:
+            return "bill"
+        return None
 
     def _get_slot_metadata(self, slots) -> Dict:
         """Returns Beancount metadata for all configured GnuCash slots"""
@@ -299,6 +320,12 @@ class GnuCash2Beancount:
         description = description.replace("\xad", "")
         description = description.replace('"', "'")
         return description
+
+    def _sanitize_link(self, link) -> str:
+        """Removes characters that are not allowed in a beancount link"""
+        link = self._INVALID_LINK_CHARS_PATTERN.sub("-", link)
+        link = re.sub(r"-+", "-", link)
+        return link.strip("-")
 
     def _get_header_str(self) -> str:
         """Returns a string that combines the configured beancount options and plugins"""

@@ -368,6 +368,33 @@ class TestGnuCash2Beancount(GnuCash2BeancountTestBase):
         ]
         assert transactions == expected_transactions
 
+    def test_get_transactions_exports_gnucash_num_as_beancount_link(self, tmp_path):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(yaml.dump(self.test_config))
+        g2b = GnuCash2Beancount(self.gnucash_path, Path(), config_path)
+        g2b._read_gnucash_book()
+        for transaction in g2b._book.transactions:
+            if transaction.description == "Transfer":
+                transaction.num = "REF 2024/001"
+                transaction.splits[0].account.type = "PAYABLE"
+        transactions = g2b._get_transactions()
+        transfer = next(txn for txn in transactions if txn.narration == "Transfer")
+        assert transfer.links == {"bill-REF-2024/001"}
+        assert transfer.meta["bill_id"] == "REF 2024/001"
+
+    def test_get_document_type_detects_invoices_and_bills_from_accounts(self, tmp_path):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(yaml.dump(self.test_config))
+        g2b = GnuCash2Beancount(Path(), Path(), config_path)
+        invoice = SimpleNamespace(
+            splits=[SimpleNamespace(account=SimpleNamespace(type="RECEIVABLE"))]
+        )
+        bill = SimpleNamespace(splits=[SimpleNamespace(account=SimpleNamespace(type="PAYABLE"))])
+        ordinary = SimpleNamespace(splits=[SimpleNamespace(account=SimpleNamespace(type="BANK"))])
+        assert g2b._get_document_type(invoice) == "invoice"
+        assert g2b._get_document_type(bill) == "bill"
+        assert g2b._get_document_type(ordinary) is None
+
     def test_get_header_str_contains_options_and_plugins(self, tmp_path):
         config_path = tmp_path / "config.yaml"
         config_path.write_text(yaml.dump(self.test_config))
